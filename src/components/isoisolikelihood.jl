@@ -1,3 +1,4 @@
+using CUDA
 
 """
     WidebandIsoIsoLikelihood(n_samples, n_fft, delay_filter, Δx, c, fs)
@@ -69,32 +70,43 @@ function loglikelihood(
     else
         τ  = inter_sensor_delay(ϕ, Δx, c)
         Δn = τ*fs
-        H  = array_delay(delay_filter, Δn)
+        H  = CuArray(array_delay_gpu(delay_filter, Δn))
+        y_fft_gpu = CuArray(y_fft)
 
-        Tullio.@tullio HᴴH[n,j,k] := conj(H[n,m,j]) * H[n,m,k]
+        HᴴH = CUDA.zeros(ComplexF64, size(H,1), size(H,3), size(H,3)) # '
+        @tullio HᴴH[n,j,k] := conj(H[n,m,j]) * H[n,m,k]
 
-        Tullio.@tullio Λ⁻¹pHᴴH[n,j,k] := HᴴH[n,j,k] + ((j == k) ? 1/λ[k] : 0)
+        Λ⁻¹pHᴴH = CUDA.zeros(ComplexF64, size(H,1), size(H,3), size(H,3))
+        @tullio Λ⁻¹pHᴴH[n,j,k] := HᴴH[n,j,k] + ((j == k) ? 1/λ[k] : 0)
 
-        D, L = ldl_striped_matrix!(Λ⁻¹pHᴴH)
+        D, L = ldl_striped_matrix_gpu!(Λ⁻¹pHᴴH)
 
-        Tullio.@tullio ℓdetΛ⁻¹pHᴴH := log(real(D[n,m]))
-        if isnothing(L) || !isfinite(ℓdetΛ⁻¹pHᴴH)
+        ℓdetΛ⁻¹pHᴴH_gpu = CUDA.zeros(Float64, size(D,1))
+        @tullio ℓdetΛ⁻¹pHᴴH_gpu := log(real(D[n,m]))
+        if isnothing(L) || !all(isfinite, (ℓdetΛ⁻¹pHᴴH_gpu))
             return -Inf
         end
 
-        Tullio.@tullio ℓdetΛ := n_fft*log(λ[i])
-        ℓdetP⊥ = ℓdetΛ + ℓdetΛ⁻¹pHᴴH
+       
+        ℓdetΛ = n_fft*sum(log, λ)
+        ℓdetP⊥ = ℓdetΛ + sum(ℓdetΛ⁻¹pHᴴH_gpu)
 
-        Tullio.@tullio Hᴴy[n,k] := conj(H[n,m,k]) * y_fft[n,m]
+        @tullio Hᴴy[n,k] := conj(H[n,m,k]) * y_fft_gpu[n,m]
 
-        L⁻¹Hᴴy            = trsv_striped_matrix!(L, Hᴴy)
-        @tullio yᴴImP⊥y := real(L⁻¹Hᴴy[n,i]/D[n,i]*conj(L⁻¹Hᴴy[n,i]))
-        yᴴP⊥y            = y_power - yᴴImP⊥y
+        L⁻¹Hᴴy            = trsv_striped_matrix_gpu!(L, Hᴴy)
 
-        if yᴴP⊥y ≤ eps(eltype(data.y))
+        yᴴImP⊥y_gpu = CUDA.zeros(Float74, suze(H,1))
+        @tullio yᴴImP⊥y_gpu[n] := real(L⁻¹Hᴴy[n,i]/D[n,i]*conj(L⁻¹Hᴴy[n,i]))
+        y_power_gpu = CuArray(fill(y_power, N))
+        yᴴP⊥y_gpu            = y_power_gpu - yᴴImP⊥y_gpu
+
+        if any(x -> x <= eps(Float64), Array(yᴴImP⊥y_gpu))
             return -Inf
         end
-        -(N*M/2 + beta)*log(alpha/2 + yᴴP⊥y) - ℓdetP⊥/2
+
+        yᴴP⊥y_total = sum(Array(yᴴP⊥y_gpu))
+        ℓdetP⊥_total = ℓdetP⊥
+        -(N*M/2 + beta)*log(alpha/2 + yᴴP⊥y_total) - ℓdetP⊥_total/2
     end
 end
 

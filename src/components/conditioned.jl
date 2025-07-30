@@ -1,4 +1,5 @@
 
+using CUDA
 
 """
     WidebandData(y, y_fft, y_power)
@@ -48,5 +49,28 @@ function WidebandConditioned(
     Y_pad = fft(y_pad, 1) / sqrt(size(y_pad, 1))
     P     = sum(abs2, y)
     data  = WidebandData(y, Y_pad, P)
+    WidebandConditioned{typeof(model), typeof(data)}(model, data)
+end
+
+function WidebandConditionedGPU(
+    model::AbstractWidebandModel,
+    y    ::AbstractMatrix{<:Real},
+)
+    @unpack n_samples, n_fft = model.likelihood
+
+    n_pad = n_fft - n_samples
+    y_pad = vcat(y, zeros(eltype(y), n_pad, size(y,2)))
+
+    # Compute FFT and normalise
+    Y_pad = fft(y_pad, 1) / sqrt(size(y_pad, 1))
+
+    # Compute power on CPU or GPU
+    P = sum(abs2, y)
+
+    # Move to GPU
+    y_gpu     = CuArray(y)
+    y_fft_gpu = CuArray(Y_pad)
+
+    data  = WidebandData(y_gpu, y_fft_gpu, P)
     WidebandConditioned{typeof(model), typeof(data)}(model, data)
 end

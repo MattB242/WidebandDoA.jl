@@ -1,5 +1,3 @@
-using CUDA
-
 """
     WidebandIsoIsoLikelihood(n_samples, n_fft, delay_filter, Δx, c, fs)
 
@@ -70,45 +68,86 @@ function loglikelihood(
     else
         τ  = inter_sensor_delay(ϕ, Δx, c)
         Δn = τ*fs
-        H  = CuArray(array_delay_gpu(delay_filter, Δn))
-        y_fft_gpu = CuArray(y_fft)
+        H  = array_delay(delay_filter, Δn)
 
-        HᴴH = CUDA.zeros(ComplexF64, size(H,1), size(H,3), size(H,3)) # '
-        @tullio HᴴH[n,j,k] := conj(H[n,m,j]) * H[n,m,k]
+        Tullio.@tullio HᴴH[n,j,k] := conj(H[n,m,j]) * H[n,m,k]
 
-        Λ⁻¹pHᴴH = CUDA.zeros(ComplexF64, size(H,1), size(H,3), size(H,3))
-        @tullio Λ⁻¹pHᴴH[n,j,k] := HᴴH[n,j,k] + ((j == k) ? 1/λ[k] : 0)
+        Tullio.@tullio Λ⁻¹pHᴴH[n,j,k] := HᴴH[n,j,k] + ((j == k) ? 1/λ[k] : 0)
 
-        D, L = ldl_striped_matrix_gpu!(Λ⁻¹pHᴴH)
+        D, L = ldl_striped_matrix!(Λ⁻¹pHᴴH)
 
-        ℓdetΛ⁻¹pHᴴH_gpu = CUDA.zeros(Float64, size(D,1))
-        @tullio ℓdetΛ⁻¹pHᴴH_gpu := log(real(D[n,m]))
-        if isnothing(L) || !all(isfinite, (ℓdetΛ⁻¹pHᴴH_gpu))
+        Tullio.@tullio ℓdetΛ⁻¹pHᴴH := log(real(D[n,m]))
+        if isnothing(L) || !isfinite(ℓdetΛ⁻¹pHᴴH)
             return -Inf
         end
 
-       
-        ℓdetΛ = n_fft*sum(log, λ)
-        ℓdetP⊥ = ℓdetΛ + sum(ℓdetΛ⁻¹pHᴴH_gpu)
+        Tullio.@tullio ℓdetΛ := n_fft*log(λ[i])
+        ℓdetP⊥ = ℓdetΛ + ℓdetΛ⁻¹pHᴴH
 
-        @tullio Hᴴy[n,k] := conj(H[n,m,k]) * y_fft_gpu[n,m]
+        Tullio.@tullio Hᴴy[n,k] := conj(H[n,m,k]) * y_fft[n,m]
 
-        L⁻¹Hᴴy            = trsv_striped_matrix_gpu!(L, Hᴴy)
+        L⁻¹Hᴴy            = trsv_striped_matrix!(L, Hᴴy)
+        @tullio yᴴImP⊥y := real(L⁻¹Hᴴy[n,i]/D[n,i]*conj(L⁻¹Hᴴy[n,i]))
+        yᴴP⊥y            = y_power - yᴴImP⊥y
 
-        yᴴImP⊥y_gpu = CUDA.zeros(Float74, suze(H,1))
-        @tullio yᴴImP⊥y_gpu[n] := real(L⁻¹Hᴴy[n,i]/D[n,i]*conj(L⁻¹Hᴴy[n,i]))
-        y_power_gpu = CuArray(fill(y_power, N))
-        yᴴP⊥y_gpu            = y_power_gpu - yᴴImP⊥y_gpu
-
-        if any(x -> x <= eps(Float64), Array(yᴴImP⊥y_gpu))
+        if yᴴP⊥y ≤ eps(eltype(data.y))
             return -Inf
         end
-
-        yᴴP⊥y_total = sum(Array(yᴴP⊥y_gpu))
-        ℓdetP⊥_total = ℓdetP⊥
-        -(N*M/2 + beta)*log(alpha/2 + yᴴP⊥y_total) - ℓdetP⊥_total/2
+        -(N*M/2 + beta)*log(alpha/2 + yᴴP⊥y) - ℓdetP⊥/2
     end
 end
+
+function loglikelihood(
+    likelihood::WidebandIsoIsoLikelihood,
+    prior     ::WidebandIsoSourcePrior,
+    data      ::WidebandData,
+    params,
+)
+    @unpack y_fft, y_power = data
+    @unpack n_fft, n_samples, delay_filter, Δx, c, fs = likelihood
+    @unpack alpha, beta = prior
+
+    ϕ = [param.phi            for param in params]
+    λ = [exp(param.loglambda) for param in params]
+
+    N = n_samples
+    M = size(y_fft, 2)
+    K = length(ϕ)
+
+    if K == 0
+        -(N*M/2 + beta)*log(alpha/2 + y_power)
+    else
+        τ  = inter_sensor_delay(ϕ, Δx, c)
+        Δn = τ*fs
+        H  = array_delay(delay_filter, CuArray(Δn))
+
+        Tullio.@tullio HᴴH[n,j,k] := conj(H[n,m,j]) * H[n,m,k]
+
+        Tullio.@tullio Λ⁻¹pHᴴH[n,j,k] := HᴴH[n,j,k] + ((j == k) ? 1/λ[k] : 0)
+
+        D, L = ldl_striped_matrix!(Λ⁻¹pHᴴH)
+
+        Tullio.@tullio ℓdetΛ⁻¹pHᴴH := log(real(D[n,m]))
+        if isnothing(L) || !isfinite(ℓdetΛ⁻¹pHᴴH)
+            return -Inf
+        end
+
+        Tullio.@tullio ℓdetΛ := n_fft*log(λ[i])
+        ℓdetP⊥ = ℓdetΛ + ℓdetΛ⁻¹pHᴴH
+
+        Tullio.@tullio Hᴴy[n,k] := conj(H[n,m,k]) * y_fft[n,m]
+
+        L⁻¹Hᴴy            = trsv_striped_matrix!(L, Hᴴy)
+        @tullio yᴴImP⊥y := real(L⁻¹Hᴴy[n,i]/D[n,i]*conj(L⁻¹Hᴴy[n,i]))
+        yᴴP⊥y            = y_power - yᴴImP⊥y
+
+        if yᴴP⊥y ≤ eps(eltype(data.y))
+            return -Inf
+        end
+        -(N*M/2 + beta)*log(alpha/2 + yᴴP⊥y) - ℓdetP⊥/2
+    end
+end
+
 
 
 """

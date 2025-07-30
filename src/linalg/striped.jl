@@ -48,7 +48,7 @@ end
 @inline function safe_complex_reciprocal(x, ϵ)
     a     = real(x)
     b     = imag(x)
-    x_mag = a*a + b*b 
+    x_mag = a*a + b*b + ϵ
     Complex(a/x_mag, -b/x_mag)
 end
 

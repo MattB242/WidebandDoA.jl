@@ -66,6 +66,39 @@ function array_delay(filter::WindowedSinc, Δn::Matrix{T})  where {T<:Real}
     H
 end
 
+function array_delay_gpu(filter::WindowedSinc, Δn::Matrix{T})  where {T<:Real}
+    n_fft = filter.n_fft
+    θ     = CuArray(collect(0:n_fft-1)*2*T(π)/n_fft)
+    a_fd  = T(0.25)
+    M, K = size(Δn)
+
+    Δn_gpu = CuArray(Δn)
+
+    H = CuArray(zeros(Complex{T}, n_fft, M, K))
+
+    @tullio H_temp[n,m,k] := begin
+        
+        idx = n - 1
+        Δθ  = -Δn_gpu[m,k] * θ[n]
+
+        idx == 0                      ? Complex{T}(1.0) :
+        idx <= ceil(Int, n_fft/2) - 2 ? exp(im * Δθ) :
+        idx == ceil(Int, n_fft/2) - 1 ? a_fd * cos(-Δn_gpu[m,k] * T(π)) +
+                                        (1 - a_fd) * exp(im * -Δn_gpu[m,k] * 2T(π)/n_fft * (T(n_fft)/2 - 1)) :
+        idx == ceil(Int, n_fft/2)     ? Complex{T}(cos(-Δn_gpu[m,k] * T(π))) :
+        zero(Complex{T})
+    end
+
+    idx_start = ceil(Int, n_fft/2) + 1
+    if isodd(n_fft)
+        H[idx_start:end, :, :] .= conj.(H[idx_start-1:-1:2, :, :])
+    else
+        H[idx_start:end, :, :] .= conj.(H[idx_start:-1:2, :, :])
+    end
+
+    return H
+end
+
 struct ComplexShift <: AbstractDelayFilter
     n_fft::Int
 end
